@@ -1,0 +1,204 @@
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# Description: Build OpenWrt using GitHub Actions
+#
+
+name: Build Official OpenWrt Test
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  CONFIG_FILE: OrangePi_R1_Plus_LTS_defconfig
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  SOURCE_URL: https://github.com/orangepi-xunlong/openwrt
+  SOURCE_BRANCH: openwrt-21.02
+  CACHE_TAG: cache
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+    
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2004)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+        ls
+
+    - name: Combine Disks
+      run: |
+        sudo swapoff -a
+        sudo rm -f /mnt/swapfile
+        export ROOT_FREE_KB=$(df --block-size=1024 --output=avail / | tail -1)
+        export ROOT_LOOP_KB=$(expr $ROOT_FREE_KB - 1048576)
+        export ROOT_LOOP_BYTES=$(expr $ROOT_LOOP_KB \* 1024)
+        sudo fallocate -l $ROOT_LOOP_BYTES /root.img
+        export ROOT_LOOP_DEVNAME=$(sudo losetup -Pf --show /root.img)
+        sudo pvcreate -f $ROOT_LOOP_DEVNAME
+        export MNT_FREE_KB=$(df --block-size=1024 --output=avail /mnt | tail -1)
+        export MNT_LOOP_KB=$(expr $MNT_FREE_KB - 102400)
+        export MNT_LOOP_BYTES=$(expr $MNT_LOOP_KB \* 1024)
+        sudo fallocate -l $MNT_LOOP_BYTES /mnt/mnt.img
+        export MNT_LOOP_DEVNAME=$(sudo losetup -Pf --show /mnt/mnt.img)
+        sudo pvcreate -f $MNT_LOOP_DEVNAME
+        sudo vgcreate vgstorage $ROOT_LOOP_DEVNAME $MNT_LOOP_DEVNAME
+        sudo lvcreate -n lvstorage -l 100%FREE vgstorage
+        export LV_DEVNAME=$(sudo lvscan | awk -F "'" '{print $2}')
+        sudo mkfs.btrfs -L combinedisk $LV_DEVNAME
+        sudo mount -o compress=zstd $LV_DEVNAME $GITHUB_WORKSPACE
+        sudo chown -R runner:runner $GITHUB_WORKSPACE
+        mkdir -p $GITHUB_WORKSPACE/tmp
+        chmod 777 $GITHUB_WORKSPACE/tmp
+        sudo cp -rp /tmp/* $GITHUB_WORKSPACE/tmp
+        sudo mount -B $GITHUB_WORKSPACE/tmp /tmp
+        
+    - name: Print Disk Usage Information
+      run: |
+        sudo btrfs filesystem usage $GITHUB_WORKSPACE
+        ls
+        
+    - name: Checkout
+      id: checkout
+      run: |
+        cd $GITHUB_WORKSPACE
+        git init
+        git remote add origin ${{ secrets.OPENWRT_URL }}
+        git fetch
+        git checkout -t origin/main
+        if [[ ! -f $CONFIG_FILE ]]
+        then
+            echo "::set-output name=status::cancel"
+        fi
+        
+    - name: Cancelling
+      if: steps.checkout.outputs.status == 'cancel'
+      uses: andymckay/cancel-action@0.2
+      
+    - name: Generate Variables
+      id: env
+      run: |
+        grep '^CONFIG_TARGET.*DEVICE.*=y' $CONFIG_FILE | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+
+        export SOURCE_OWNER=$(echo $SOURCE_URL | awk -F '/' '{print $(NF-1)}')
+        echo "SOURCE_OWNER=$SOURCE_OWNER" >> $GITHUB_ENV
+        export SOURCE_REPO=$(echo $SOURCE_URL | awk -F '/' '{print $(NF)}')
+        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
+        mkdir -p workspace/openwrt
+        cd workspace/openwrt
+        echo "OPENWRT_ROOT_PATH=$PWD" >> $GITHUB_ENV
+          
+    - name: Compare Toolchain Hash
+      id: hash
+      run: |
+        export TOOLS_HASH=$(curl -fsSL \
+          https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/commits\?sha\=$SOURCE_BRANCH\&path\=tools | jq '.[0] | .sha' | sed 's/"//g')
+        export TOOLCHAIN_HASH=$(curl -fsSL \
+          https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/commits\?sha\=$SOURCE_BRANCH\&path\=toolchain | jq '.[0] | .sha' | sed 's/"//g')
+        export CURRENT_HASH=$(echo -n "$TOOLS_HASH$TOOLCHAIN_HASH" | md5sum | awk '{print $1}')
+        echo "CURRENT_HASH=$CURRENT_HASH" >> $GITHUB_ENV
+        echo "CURRENT_HASH is $CURRENT_HASH"
+        export CACHE_HASH=$(curl -fSsL https://github.com/$GITHUB_REPOSITORY/releases/download/$CACHE_TAG/cache-${SOURCE_OWNER}.hash)
+        echo "CACHE_HASH is $CACHE_HASH"
+        if [ -z "$CACHE_HASH" ] || [ "$CURRENT_HASH" != "$CACHE_HASH" ]; then
+          echo "::set-output name=REBUILD_CACHE::true"
+        fi
+          
+    - name: Clone Source Code
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      id: clone
+      run: |
+        git clone $SOURCE_URL -b $SOURCE_BRANCH $OPENWRT_ROOT_PATH
+
+    - name: Generate Config File
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      run: |
+        [ -e $CONFIG_FILE ] && mv -f $CONFIG_FILE $OPENWRT_ROOT_PATH/.config
+        cp $OPENWRT_ROOT_PATH/.config $CONFIG_FILE
+        
+    - name: Install Feeds
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      run: |
+        cd $OPENWRT_ROOT_PATH
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        grep '^CONFIG_TARGET.*=y' .config > cache.config
+        mv -f cache.config .config
+        echo CONFIG_PACKAGE_node=y >> .config
+        make defconfig
+
+    - name: Compile CACHE
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      run: |
+        cd $OPENWRT_ROOT_PATH
+        make -j$(nproc) || make -j1 V=s
+          
+    - name: Clean Process
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      run: |
+        cd $OPENWRT_ROOT_PATH
+        ./scripts/feeds clean
+        make clean
+        rm -rf .config* dl logs tmp
+          
+    - name: Generate CACHE Image
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      run: |
+        cd workspace
+        mksquashfs openwrt cache-${SOURCE_OWNER}.img -force-gid 1001 -force-uid 1001 -comp zstd
+        mkdir -p $GITHUB_WORKSPACE/output
+        split -d -b 1900M cache-${SOURCE_OWNER}.img $GITHUB_WORKSPACE/output/cache-${SOURCE_OWNER}.img.
+        rm cache-${SOURCE_OWNER}.img
+        cd $OPENWRT_ROOT_PATH
+        echo $CURRENT_HASH > $GITHUB_WORKSPACE/output/cache-${SOURCE_OWNER}.hash
+        ls -lh $GITHUB_WORKSPACE/output
+
+    - name: Delete Old Toolchain Assets
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      uses: mknejp/delete-release-assets@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        tag: ${{ env.CACHE_TAG }}
+        assets: "cache.*"
+        fail-if-no-assets: false
+        fail-if-no-release: false
+
+    - name: Upload Toolchain Image To Release
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      uses: ncipollo/release-action@v1.8.0
+      with:
+        name: cache-image
+        allowUpdates: true
+        replacesArtifacts: true
+        prerelease: true
+        tag: ${{ env.CACHE_TAG }}
+        commit: ${{ env.CURRENT_BRANCH }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+        artifacts: output/*
+
+    - name: Clean Toolchain Image
+      if: steps.hash.outputs.REBUILD_CACHE == 'true'
+      run: |
+        rm -rf output
+        
+    - name: Print Disk Usage Information
+      if: always()
+      run: |
+        sudo btrfs filesystem usage $GITHUB_WORKSPACE
