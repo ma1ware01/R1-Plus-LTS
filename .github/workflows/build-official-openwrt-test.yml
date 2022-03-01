@@ -155,7 +155,6 @@ jobs:
       run: |
         cd $OPENWRT_ROOT_PATH
         ./scripts/feeds clean
-        make clean
         rm -rf .config* dl logs tmp
           
     - name: Generate CACHE Image
