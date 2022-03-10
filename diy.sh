@@ -25,7 +25,7 @@ pushd package/community
 #git clone  --depth=1 https://github.com/project-openwrt/luci-app-unblockneteasemusic.git 
 
 # Add ServerChan
-git clone --depth=1 https://github.com/tty228/luci-app-serverchan
+#git clone --depth=1 https://github.com/tty228/luci-app-serverchan
 
 # Add OpenClash
 git clone --depth=1 https://github.com/vernesong/OpenClash
@@ -53,12 +53,6 @@ rm -rf ./small/shadowsocks-rust
 popd
 
 # Docker
-svn co https://github.com/lisaac/luci-app-dockerman/trunk/applications/luci-app-dockerman package/luci-app-dockerman
-git clone --depth=1 https://github.com/lisaac/luci-lib-docker
-if [ -e feeds/packages/utils/docker-ce ];then
-	sed -i '/dockerd/d' package/luci-app-dockerman/Makefile
-	sed -i 's/+docker/+docker-ce/g' package/luci-app-dockerman/Makefile
-fi
 
 # Mod zzz-default-settings
 sed -i "/commit luci/i\uci set luci.main.mediaurlbase='/luci-static/argon'" package/lean/default-settings/files/zzz-default-settings
@@ -66,6 +60,6 @@ sed -i "/commit luci/i\uci set luci.main.mediaurlbase='/luci-static/argon'" pack
 # Openwrt version
 version=$(grep "DISTRIB_REVISION=" package/lean/default-settings/files/zzz-default-settings  | awk -F "'" '{print $2}')
 sed -i '/DISTRIB_REVISION/d' package/lean/default-settings/files/zzz-default-settings
-echo "echo \"DISTRIB_REVISION='${version} $(TZ=UTC-8 date "+%Y.%m.%d") Compilde by mingxiaoyu'\" >> /etc/openwrt_release" >> package/lean/default-settings/files/zzz-default-settings
+echo "echo \"DISTRIB_REVISION='${version} $(TZ=UTC-8 date "+%Y.%m.%d") Compilde by ma1ware01'\" >> /etc/openwrt_release" >> package/lean/default-settings/files/zzz-default-settings
 sed -i '/exit 0/d' package/lean/default-settings/files/zzz-default-settings
 echo "exit 0" >> package/lean/default-settings/files/zzz-default-settings
